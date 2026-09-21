@@ -45,6 +45,12 @@ var lstat = os.Lstat
 type Simulator struct {
 	host  *host.Host
 	ready atomic.Bool
+
+	// displaced holds the target of a foreign driver-root symlink that Apply
+	// moved aside, so Revoke can hand the node back the way it found it. A nil
+	// pointer means we displaced nothing and Revoke has nothing to restore.
+	// Apply and Revoke run in the same process, so this needs no on-disk state.
+	displaced atomic.Pointer[string]
 }
 
 // New returns a gpudriver Simulator.
@@ -111,18 +117,46 @@ func (s *Simulator) Discard(_ context.Context) error {
 	return errors.Join(errs...)
 }
 
-// Apply creates the GPU-Operator compatibility symlink at /run/nvidia/driver,
-// replacing whatever is already there.
+// Apply publishes the GPU-Operator compatibility symlink at /run/nvidia/driver.
+//
+// The path is shared with the GPU Operator's driver container, so Apply leaves
+// the node as it found it: a foreign symlink may be displaced but its target is
+// recorded for Revoke to restore, and a directory or a file - which cannot be
+// displaced and put back - is refused outright.
 func (s *Simulator) Apply(_ context.Context, _ *agent.State) error {
 	zap.L().Info("applying simulator", zap.String("simulator", name))
 	s.ready.Store(false)
 
 	driverLink := s.host.RunPath(driverLinkRel)
 
-	// Called for the warning it emits: displacing another owner's driver root is
-	// worth a log line even though we go on to do it.
-	if _, err := ownsDriverLink(driverLink); err != nil {
-		return err
+	root, err := probeDriverRoot(driverLink)
+
+	switch {
+	case err != nil:
+		// Publishing the symlink is the point of Apply, so a probe that cannot
+		// complete is a warning rather than a failure. Nothing gets recorded,
+		// so Revoke will not try to restore a target we never managed to read.
+		zap.L().Warn("cannot identify the existing driver root; publishing over it",
+			zap.String("path", driverLink), zap.Error(err))
+
+	case root.kind == driverRootOccupied:
+		return fmt.Errorf("driver root %s is an existing %s belonging to another component: refusing to replace it",
+			driverLink, root.what)
+
+	case root.kind == driverRootForeign:
+		zap.L().Warn("displacing another component's driver root; revoke restores it",
+			zap.String("path", driverLink), zap.String("target", root.target))
+
+		s.displaced.Store(&root.target)
+
+	case root.kind == driverRootAbsent:
+		// Nothing is there to hand back, and any earlier record is stale: the
+		// driver root we displaced is already gone.
+		s.displaced.Store(nil)
+
+	case root.kind == driverRootOurs:
+		// Re-applying over our own symlink. Whatever the first Apply displaced
+		// is still displaced, so that record has to survive.
 	}
 
 	if err := fsutil.Symlink(driverLinkTarget, driverLink); err != nil {
@@ -130,56 +164,120 @@ func (s *Simulator) Apply(_ context.Context, _ *agent.State) error {
 	}
 
 	s.ready.Store(true)
+
 	return nil
 }
 
-// Revoke removes the /run/nvidia/driver symlink. Anything else at that path
-// belongs to another owner of the node's /run/nvidia and is left alone.
+// Revoke takes our /run/nvidia/driver symlink back down: it restores the driver
+// root Apply displaced, or removes the symlink when Apply displaced nothing.
+// Anything we cannot positively identify as ours is left untouched.
 func (s *Simulator) Revoke(_ context.Context) error {
 	zap.L().Info("revoking simulator", zap.String("simulator", name))
 	s.ready.Store(false)
 
 	link := s.host.RunPath(driverLinkRel)
 
-	ours, err := ownsDriverLink(link)
-
-	if err != nil || !ours {
+	root, err := probeDriverRoot(link)
+	if err != nil {
+		// Deleting a path we failed to identify is exactly the damage this
+		// simulator is supposed to avoid.
 		return err
+	}
+
+	if root.kind != driverRootOurs {
+		zap.L().Warn("driver root is not ours; leaving it alone",
+			zap.String("path", link), zap.String("kind", root.String()))
+
+		return nil
+	}
+
+	if displaced := s.displaced.Load(); displaced != nil {
+		zap.L().Info("restoring the driver root we displaced",
+			zap.String("path", link), zap.String("target", *displaced))
+
+		if err := fsutil.Symlink(*displaced, link); err != nil {
+			return err
+		}
+
+		s.displaced.Store(nil)
+
+		return nil
 	}
 
 	return fsutil.Remove(link)
 }
 
-// ownsDriverLink reports whether link is the symlink Apply created. Absent, not
-// a symlink, or pointing elsewhere all mean it is not ours.
-func ownsDriverLink(link string) (bool, error) {
+// driverRootKind classifies what occupies the driver-root path.
+type driverRootKind int
+
+const (
+	driverRootAbsent   driverRootKind = iota // nothing is there
+	driverRootOurs                           // the symlink Apply published
+	driverRootForeign                        // a symlink to somebody else's driver root
+	driverRootOccupied                       // a directory, a file, or anything else
+)
+
+// driverRoot is one observation of the driver-root path.
+type driverRoot struct {
+	kind driverRootKind
+	// target is the symlink target, for driverRootForeign.
+	target string
+	// what names the occupant for a human, for driverRootOccupied.
+	what string
+}
+
+// String renders the observation for a log field.
+func (r driverRoot) String() string {
+	switch r.kind {
+	case driverRootAbsent:
+		return "absent"
+	case driverRootOurs:
+		return "ours"
+	case driverRootForeign:
+		return "symlink to " + r.target
+	case driverRootOccupied:
+		return r.what
+	}
+
+	return "unknown"
+}
+
+// probeDriverRoot reports what is at link. An error means the path could not be
+// identified at all, which callers must not confuse with "not ours".
+func probeDriverRoot(link string) (driverRoot, error) {
 	fi, err := lstat(link)
 	if os.IsNotExist(err) {
-		return false, nil
+		return driverRoot{kind: driverRootAbsent}, nil
 	}
 
 	if err != nil {
-		return false, fmt.Errorf("lstat %s: %w", link, err)
+		return driverRoot{}, fmt.Errorf("lstat %s: %w", link, err)
 	}
 
 	if fi.Mode()&os.ModeSymlink == 0 {
-		zap.L().Warn("driver root is not our symlink",
-			zap.String("path", link), zap.String("type", fi.Mode().Type().String()))
-
-		return false, nil
+		return driverRoot{kind: driverRootOccupied, what: describeMode(fi.Mode())}, nil
 	}
 
 	target, err := os.Readlink(link)
 	if err != nil {
-		return false, fmt.Errorf("readlink %s: %w", link, err)
+		return driverRoot{}, fmt.Errorf("readlink %s: %w", link, err)
 	}
 
-	if target != driverLinkTarget {
-		zap.L().Warn("driver symlink points elsewhere",
-			zap.String("path", link), zap.String("target", target))
-
-		return false, nil
+	if target == driverLinkTarget {
+		return driverRoot{kind: driverRootOurs, target: target}, nil
 	}
 
-	return true, nil
+	return driverRoot{kind: driverRootForeign, target: target}, nil
+}
+
+// describeMode names a file type the way an operator reading the error would.
+func describeMode(m os.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m.IsRegular():
+		return "regular file"
+	}
+
+	return m.Type().String()
 }
