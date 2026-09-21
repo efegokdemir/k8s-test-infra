@@ -4,6 +4,7 @@
 package gpudriver
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -418,4 +419,189 @@ func TestStageCharDevs_PrunesShrunkDeviceSet(t *testing.T) {
 	require.FileExists(t, filepath.Join(devRoot, "nvidia1"))
 	require.NoFileExists(t, filepath.Join(devRoot, "nvidia2"))
 	require.NoFileExists(t, filepath.Join(devRoot, "nvidia3"))
+}
+
+// ─── Apply / Revoke: leave the node as you found it ──────────────────────────
+//
+// /run/nvidia/driver is shared with the GPU Operator's driver container. The
+// tests below pin the whole contract: Apply may displace a foreign symlink but
+// has to hand the node back unchanged, and it must refuse outright to replace a
+// directory or a file it cannot put back.
+
+// A foreign symlink is the GPU Operator's own driver root. Apply is allowed to
+// point the path at us, but the node has to come back as it was.
+func TestApplyRevoke_RestoresDisplacedForeignSymlink(t *testing.T) {
+	h := testHost(t)
+	sim := New(h)
+	link := h.RunPath(driverLinkRel)
+	require.NoError(t, fsutil.Symlink("/opt/real-driver", link))
+
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+
+	published, err := os.Readlink(link)
+	require.NoError(t, err)
+	require.Equal(t, driverLinkTarget, published, "Apply still publishes our driver root")
+
+	require.NoError(t, sim.Revoke(t.Context()))
+
+	restored, err := os.Readlink(link)
+	require.NoError(t, err, "the displaced driver root must be put back, not deleted")
+	require.Equal(t, "/opt/real-driver", restored)
+}
+
+// Re-applying finds our own symlink. The displaced target was recorded by the
+// first Apply and must survive, or the second Apply silently forgets how to put
+// the node back.
+func TestApplyTwice_KeepsTheDisplacedForeignTarget(t *testing.T) {
+	h := testHost(t)
+	sim := New(h)
+	link := h.RunPath(driverLinkRel)
+	require.NoError(t, fsutil.Symlink("/opt/real-driver", link))
+
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+	require.NoError(t, sim.Revoke(t.Context()))
+
+	restored, err := os.Readlink(link)
+	require.NoError(t, err)
+	require.Equal(t, "/opt/real-driver", restored,
+		"the second Apply must not drop the first Apply's displacement record")
+}
+
+// Once the path is gone there is nothing left to restore: resurrecting a driver
+// root somebody else deleted would be its own kind of damage.
+func TestApply_ForgetsTheDisplacedTargetOnceThePathIsGone(t *testing.T) {
+	h := testHost(t)
+	sim := New(h)
+	link := h.RunPath(driverLinkRel)
+	require.NoError(t, fsutil.Symlink("/opt/real-driver", link))
+
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+	require.NoError(t, sim.Revoke(t.Context()))
+
+	_, err := os.Lstat(link)
+	require.ErrorIs(t, err, os.ErrNotExist,
+		"nothing was displaced by the second Apply, so Revoke just removes our link")
+}
+
+// A directory or a file cannot be displaced and put back, so Apply refuses.
+// fsutil.Symlink would unlink an empty directory or a regular file outright,
+// which is why those two cases are here and not just the populated one.
+func TestApply_RefusesToReplaceAForeignDirectoryOrFile(t *testing.T) {
+	cases := []struct {
+		name  string
+		names string
+		plant func(t *testing.T, link string)
+		check func(t *testing.T, link string)
+	}{
+		{
+			name:  "populated GPU-Operator driver root",
+			names: "directory",
+			plant: func(t *testing.T, link string) {
+				lib := filepath.Join(link, "usr/lib64/libnvidia-ml.so.1")
+				require.NoError(t, os.MkdirAll(filepath.Dir(lib), 0o755))
+				require.NoError(t, os.WriteFile(lib, []byte("real driver"), 0o644))
+			},
+			check: func(t *testing.T, link string) {
+				data, err := os.ReadFile(filepath.Join(link, "usr/lib64/libnvidia-ml.so.1"))
+				require.NoError(t, err)
+				require.Equal(t, "real driver", string(data))
+			},
+		},
+		{
+			name:  "empty directory",
+			names: "directory",
+			plant: func(t *testing.T, link string) {
+				require.NoError(t, os.MkdirAll(link, 0o755))
+			},
+			check: func(t *testing.T, link string) {
+				fi, err := os.Lstat(link)
+				require.NoError(t, err, "an empty directory must not be unlinked either")
+				require.True(t, fi.IsDir())
+			},
+		},
+		{
+			name:  "regular file",
+			names: "regular file",
+			plant: func(t *testing.T, link string) {
+				require.NoError(t, fsutil.Write(link, []byte("driver"), 0o644))
+			},
+			check: func(t *testing.T, link string) {
+				data, err := os.ReadFile(link)
+				require.NoError(t, err)
+				require.Equal(t, "driver", string(data))
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := testHost(t)
+			sim := New(h)
+			link := h.RunPath(driverLinkRel)
+			c.plant(t, link)
+
+			err := sim.Apply(t.Context(), testState(t))
+
+			require.Error(t, err, "Apply must fail fast rather than destroy a foreign driver root")
+			require.ErrorContains(t, err, link, "the error must name the path")
+			require.ErrorContains(t, err, c.names, "the error must name what is there")
+			require.False(t, sim.Ready())
+			c.check(t, link)
+		})
+	}
+}
+
+// Publishing the symlink is the point of Apply: a probe that cannot read the
+// path must not cost us the whole apply. Nothing is recorded, so Revoke will
+// not invent a restore either.
+func TestApply_ProbeFailureWarnsAndPublishesAnyway(t *testing.T) {
+	h := testHost(t)
+	sim := New(h)
+	link := h.RunPath(driverLinkRel)
+
+	restore := lstat
+	lstat = func(string) (os.FileInfo, error) { return nil, errors.New("boom") }
+	t.Cleanup(func() { lstat = restore })
+
+	require.NoError(t, sim.Apply(t.Context(), testState(t)),
+		"a failed ownership probe must not abort Apply")
+	require.True(t, sim.Ready())
+
+	target, err := os.Readlink(link)
+	require.NoError(t, err)
+	require.Equal(t, driverLinkTarget, target)
+}
+
+// The mirror of the rule above: Revoke deletes only what it positively
+// identified as ours, so a probe failure leaves the path alone.
+func TestRevoke_ProbeFailureLeavesThePathAlone(t *testing.T) {
+	h := testHost(t)
+	sim := New(h)
+	link := h.RunPath(driverLinkRel)
+	require.NoError(t, sim.Apply(t.Context(), testState(t)))
+
+	restore := lstat
+	lstat = func(string) (os.FileInfo, error) { return nil, errors.New("boom") }
+	t.Cleanup(func() { lstat = restore })
+
+	require.Error(t, sim.Revoke(t.Context()))
+
+	_, err := os.Lstat(link)
+	require.NoError(t, err, "Revoke must not delete a path it could not identify")
+}
+
+// Revoke never displaced this symlink, so it is not ours to restore or remove.
+func TestRevoke_LeavesAForeignSymlinkItNeverDisplaced(t *testing.T) {
+	h := testHost(t)
+	link := h.RunPath(driverLinkRel)
+	require.NoError(t, fsutil.Symlink("/opt/real-driver", link))
+
+	require.NoError(t, New(h).Revoke(t.Context()))
+
+	target, err := os.Readlink(link)
+	require.NoError(t, err)
+	require.Equal(t, "/opt/real-driver", target)
 }

@@ -37,6 +37,10 @@ var (
 	_ agent.Applier   = (*Simulator)(nil)
 )
 
+// lstat is a seam so tests can make the driver-root ownership probe fail; there
+// is no portable way to provoke a real lstat error on a path we can create.
+var lstat = os.Lstat
+
 // Simulator implements agent.Simulator and agent.Applier.
 type Simulator struct {
 	host  *host.Host
@@ -149,7 +153,7 @@ func (s *Simulator) Revoke(_ context.Context) error {
 // ownsDriverLink reports whether link is the symlink Apply created. Absent, not
 // a symlink, or pointing elsewhere all mean it is not ours.
 func ownsDriverLink(link string) (bool, error) {
-	fi, err := os.Lstat(link)
+	fi, err := lstat(link)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
