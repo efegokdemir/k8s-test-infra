@@ -215,16 +215,82 @@ fails the render instead.
 {{- if and (not .Values.gpu.customConfig) (not (include "nvml-mock.migProfiles" .)) -}}
 {{- fail (printf "gpu.mig.enabled is set but the chart ships no MIG profile table for profile %q at profiles/mig/%s.yaml, so the board would come up not MIG-capable" .Values.gpu.profile .Values.gpu.profile) -}}
 {{- end -}}
+{{- /*
+The board's own table, indexed both ways a layout can select a row. A layout
+the board cannot satisfy is not a partial layout: the engine creates what
+fits, logs the rest and the install still reports success, so the node comes
+up short of slices and nothing says why. Everything below is checked against
+this table, which is why all of it is skipped for gpu.customConfig, where the
+table is the user's and the chart cannot know its rows.
+
+The board's width is the widest row it publishes — the whole-board profile —
+and a row's `instances` is how many of that shape the board holds, which is
+the memory limit as much as the slice one: an A100 fits seven 1g.5gb but only
+four 1g.10gb.
+*/ -}}
+{{- $rows := get (fromYaml (include "nvml-mock.migProfiles" .)) "supported_profiles" | default list -}}
+{{- $byName := dict -}}
+{{- $byID := dict -}}
+{{- $names := list -}}
+{{- $ids := list -}}
+{{- $width := 0 -}}
+{{- range $row := $rows -}}
+{{- $_ := set $byName (get $row "name") $row -}}
+{{- $_ := set $byID (get $row "profile_id" | toString) $row -}}
+{{- $names = append $names (get $row "name") -}}
+{{- $ids = append $ids (get $row "profile_id" | toString) -}}
+{{- $width = max $width (get $row "slices" | int) -}}
+{{- end -}}
 {{- $partitions := 0 -}}
+{{- $slices := 0 -}}
 {{- range $instance := (get $mig "gpu_instances" | default list) -}}
 {{- $count := 1 -}}
 {{- if hasKey $instance "count" -}}
 {{- $count = get $instance "count" | int -}}
 {{- end -}}
+{{- $selector := "" -}}
+{{- if hasKey $instance "profile" -}}
+{{- $selector = printf "profile %q" (get $instance "profile") -}}
+{{- else if hasKey $instance "profile_id" -}}
+{{- $selector = printf "profile_id %v" (get $instance "profile_id") -}}
+{{- end -}}
+{{- /*
+values.schema.json rejects this too, and rejects it earlier. It is repeated
+here because the schema is skippable — `helm install --skip-schema-validation`
+is a supported flag, and a user reaching for it to get past an unrelated
+complaint would otherwise lose this rule alone, since every other refusal in
+this block lives in the template.
+*/ -}}
+{{- if lt $count 1 -}}
+{{- fail (printf "gpu.mig.gpuInstances declares %s with count: %d, which still creates one instance. Drop the entry instead." $selector $count) -}}
+{{- end -}}
 {{- $partitions = add $partitions $count -}}
+{{- if $rows -}}
+{{- $offers := "" -}}
+{{- $row := dict -}}
+{{- if hasKey $instance "profile" -}}
+{{- $offers = join ", " $names -}}
+{{- $row = get $byName (get $instance "profile") | default dict -}}
+{{- else if hasKey $instance "profile_id" -}}
+{{- $offers = join ", " $ids -}}
+{{- $row = get $byID (get $instance "profile_id" | toString) | default dict -}}
+{{- end -}}
+{{- if and $selector (not $row) -}}
+{{- fail (printf "gpu.mig.gpuInstances declares %s, which board %q does not publish. Its table offers: %s" $selector $.Values.gpu.profile $offers) -}}
+{{- end -}}
+{{- if $row -}}
+{{- if gt $count (get $row "instances" | int) -}}
+{{- fail (printf "gpu.mig.gpuInstances asks for %d of %q, but board %q holds %d." $count (get $row "name") $.Values.gpu.profile (get $row "instances" | int)) -}}
+{{- end -}}
+{{- $slices = add $slices (mul $count (get $row "slices" | int)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if eq (int $partitions) 0 -}}
 {{- fail "gpu.mig.enabled is set but gpu.mig.gpuInstances declares no partitions, so the node would come up MIG-enabled with nothing partitioned. Name the layout, e.g. --set gpu.mig.gpuInstances[0].profile=1g.10gb --set gpu.mig.gpuInstances[0].count=7" -}}
+{{- end -}}
+{{- if gt (int $slices) (int $width) -}}
+{{- fail (printf "gpu.mig.gpuInstances asks for %d compute slices, but board %q has %d." (int $slices) $.Values.gpu.profile (int $width)) -}}
 {{- end -}}
 {{- $_ := set $mig "mode_current" "enabled" -}}
 {{- $_ := set $mig "mode_pending" "enabled" -}}

@@ -1017,3 +1017,47 @@ func TestMarkMIGDirty_IsSpentWhenTheDocumentCannotBeMerged(t *testing.T) {
 		"the last config that merged is still authoritative over the board")
 	require.False(t, dev.migDirty.Load(), "the mark must not outlive the pass it asked for")
 }
+
+// migIdentities is the board as a consumer reads it back: every MIG device,
+// under the UUID NVML answers for it.
+func migIdentities(t *testing.T, dev *ConfigurableDevice) []string {
+	t.Helper()
+	identities := make([]string, 0, a100PlacementCapacity)
+	for i := range a100PlacementCapacity {
+		migDev, ret := dev.GetMigDeviceHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			continue
+		}
+		uuid, ret := migDev.GetUUID()
+		require.Equal(t, nvml.SUCCESS, ret)
+		identities = append(identities, uuid)
+	}
+	return identities
+}
+
+// Cycling MIG off and on is how an operator rebuilds a board, and the layout
+// it comes back with is the same layout. The instance IDs that rebuild draws
+// are what a MIG device's UUID is spliced from, so drawing fresh ones would
+// rename every partition: a consumer that lived through the cycle would
+// disagree with one that dlopened after it, and both would disagree with the
+// capability nodes the node agent stages, which it derives by reading the
+// same profile into an engine of its own.
+func TestSetMigMode_RebuildingTheLayoutKeepsPartitionIdentity(t *testing.T) {
+	dev, _, _ := newTestDevice(t, a100PartitionedConfig())
+
+	before := migIdentities(t, dev)
+	require.Len(t, before, a100PlacementCapacity, "the board starts out fully partitioned")
+
+	activation, ret := dev.SetMigMode(nvml.DEVICE_MIG_DISABLE)
+	require.Equal(t, nvml.SUCCESS, ret)
+	require.Equal(t, nvml.SUCCESS, activation)
+	require.Empty(t, migIdentities(t, dev), "disabling MIG takes the partitions with it")
+
+	activation, ret = dev.SetMigMode(nvml.DEVICE_MIG_ENABLE)
+	require.Equal(t, nvml.SUCCESS, ret)
+	require.Equal(t, nvml.SUCCESS, activation)
+	dev.MarkMIGDirty()
+
+	require.Equal(t, before, migIdentities(t, dev),
+		"the rebuilt layout has to come back under the identities it went away with")
+}

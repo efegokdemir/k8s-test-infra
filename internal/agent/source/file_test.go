@@ -543,6 +543,7 @@ func TestCompileState_MIGFromProfile(t *testing.T) {
 	data := []byte(`
 version: "1.0"
 system:
+  driver_version: "550.163.01"
   num_devices: 2
 device_defaults:
   name: "NVIDIA A100-SXM4-40GB"
@@ -724,6 +725,86 @@ func TestFileSource_AnUnreadableMIGTableDoesNotWithdrawThePartitions(t *testing.
 	require.Nil(t, u.State, "no state means gpudriver stages nothing and withdraws nothing")
 }
 
+// The same rule as the unreadable table, one step further in: a profile that
+// reads back fine and does not validate is still not a board to reconfigure
+// the node onto. gpudriver stages whatever state it is handed, so emitting a
+// nil state with the error is what keeps the partitions, the capability nodes
+// and the CDI entries of the last good profile in place.
+func TestFileSource_AProfileTheLibraryWouldRefuseDoesNotReplaceTheLastGoodOne(t *testing.T) {
+	t.Parallel()
+
+	configPath := migSiblingLayout(t)
+	migWriteSiblingTable(t, configPath)
+
+	f := NewFileSource(configPath, filepath.Join(filepath.Dir(configPath), "topology.yaml"), zap.NewNop())
+
+	var hash [32]byte
+	u := pollOnce(t, f, &hash)
+	require.NotNil(t, u)
+	require.NoError(t, u.Err)
+	require.True(t, u.State.MIG.Partitioned(), "the board starts out partitioned")
+
+	refused := strings.Replace(migLayoutWithoutTable, "  driver_version: \"580.65.06\"\n", "", 1)
+	require.NoError(t, os.WriteFile(configPath, []byte(refused), 0o600))
+
+	u = pollOnce(t, f, &hash)
+	require.NotNil(t, u, "a profile that cannot be staged must emit rather than go quiet")
+	require.Error(t, u.Err, "the library would refuse this profile and fall back to its defaults")
+	require.Nil(t, u.State, "no state means gpudriver stages nothing and withdraws nothing")
+}
+
+// The agent stages the very document the mock library later loads, and the
+// library answers a profile it cannot validate by falling back to its built-in
+// eight-A100 default. A profile the agent accepts and the library refuses
+// therefore does not surface as an error anywhere: the node simulates hardware
+// that the character devices, capability nodes and CDI entries staged beside it
+// do not describe. The two verdicts have to be the same verdict.
+func TestCompileState_AcceptsExactlyWhatTheLibraryAccepts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		doc  string
+	}{
+		{
+			name: "the layout the chart renders",
+			doc:  migLayoutWithoutTable,
+		},
+		{
+			// Naming a row twice leaves no single row selected.
+			name: "an entry carrying both profile selectors",
+			doc: strings.Replace(migLayoutWithoutTable,
+				`      - profile: "1g.23gb"`,
+				"      - profile: \"1g.23gb\"\n        profile_id: 19", 1),
+		},
+		{
+			name: "no driver version",
+			doc:  strings.Replace(migLayoutWithoutTable, "  driver_version: \"580.65.06\"\n", "", 1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configPath, []byte(tt.doc), 0o600))
+			migWriteSiblingTable(t, configPath)
+
+			_, libErr := engine.LoadYAMLConfig(configPath)
+			_, agentErr := compileState([]byte(tt.doc), configPath)
+
+			if libErr == nil {
+				require.NoError(t, agentErr, "the library loads this profile, so the agent must compile it")
+
+				return
+			}
+			require.Error(t, agentErr,
+				"the library refuses this profile (%v) and would fall back to its defaults, so the agent must not stage it", libErr)
+		})
+	}
+}
+
 // TestCompileState_MIGDisabledInEveryShippedProfile pins the deliberate default:
 // a MIG-capable profile declares what it could be partitioned into but boots
 // with MIG off, because migStrategy=single stops publishing nvidia.com/gpu the
@@ -829,6 +910,7 @@ func TestCompileState_MIGCapsFollowTheDeviceMinor(t *testing.T) {
 	data := []byte(`
 version: "1.0"
 system:
+  driver_version: "550.163.01"
   num_devices: 2
 device_defaults:
   name: "NVIDIA A100-SXM4-40GB"

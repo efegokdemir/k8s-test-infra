@@ -183,11 +183,12 @@ func inputsHash(config, topology, migTable []byte) [32]byte {
 	return sha256.Sum256(joined)
 }
 
-// parseProfile decodes a profile and checks what the agent acts on before the
-// engine ever sees the file. The agent stages the character devices and writes
-// both CDI specs, so it cannot wait for the engine to reject minors that
-// collide. Only that check runs here: the rest of the engine's validation
-// demands fields the agent deliberately tolerates, driver_version among them.
+// parseProfile decodes a profile and holds it to the same rules the mock
+// library applies when it loads one. The agent stages the document the library
+// later reads, and the library answers a profile it rejects by falling back to
+// its built-in defaults rather than failing, so a profile the agent waved
+// through would leave the node simulating hardware that the character devices,
+// capability nodes and CDI entries staged beside it do not describe.
 func parseProfile(data []byte, configPath string) (engine.YAMLConfig, error) {
 	var cfg engine.YAMLConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -201,7 +202,7 @@ func parseProfile(data []byte, configPath string) (engine.YAMLConfig, error) {
 	if err := engine.ApplyMIGProfilesOverlay(&cfg, configPath); err != nil {
 		return cfg, fmt.Errorf("resolve MIG profile table: %w", err)
 	}
-	return cfg, engine.ValidateMinorNumbers(&cfg)
+	return cfg, engine.ValidateConfig(&cfg)
 }
 
 // compileState parses raw YAML config bytes and builds the agent State.

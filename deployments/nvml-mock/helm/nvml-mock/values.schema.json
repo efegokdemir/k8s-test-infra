@@ -135,8 +135,8 @@
                   },
                   "count": {
                     "type": "integer",
-                    "description": "How many identical instances to create. Defaults to 1. Zero asks for none, so a layout whose counts all sit at zero is rejected the same way an empty one is.",
-                    "minimum": 0
+                    "description": "How many identical instances to create. Omit it for one. Zero is rejected rather than treated as none: the engine cannot tell an explicit zero from an omitted count, so a zeroed entry would come back as the single instance it asked not to be. Drop the entry instead.",
+                    "minimum": 1
                   }
                 }
               }

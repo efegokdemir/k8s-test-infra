@@ -183,12 +183,11 @@ match a real board's listing.
 ## Limits
 
 A runtime repartition changes the NVML view only. `/dev/nvidia-caps` and the
-`mig-minors` table are staged once when the `nvml-mock` pod starts, so the
-device plugin cannot allocate what a repartition produces — including a layout
-identical to the installed one, since rebuilding it draws fresh GPU-instance
-ids. Clearing the override restores the layout NVML reports but not the ids it
-reports them under, so only restarting the `nvml-mock` pod returns the node to
-an allocatable state.
+`mig-minors` table are staged once when the `nvml-mock` pod starts, so a
+partition that a repartition created is never allocatable, however long it is
+left in place. Clearing the override returns NVML to the installed layout,
+under the same GPU-instance ids and MIG UUIDs it reported before — the
+identities those staged files were written for.
 
 There is no CUDA, so a MIG slice schedules and admits a pod but runs no kernels
 on it.
@@ -216,7 +215,8 @@ the layout is uniform — `migStrategy=single` rejects a mix of profiles — the
 read the plugin's logs.
 
 **A partition `nvidia-smi` reports cannot be allocated.** It was created at
-runtime; see [Limits](#limits). Restart the `nvml-mock` pod on that node.
+runtime; see [Limits](#limits). Clear the override to put the installed layout
+back, or restart the `nvml-mock` pod on that node.
 
 ## Related
 

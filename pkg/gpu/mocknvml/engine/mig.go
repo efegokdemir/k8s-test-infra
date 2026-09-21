@@ -910,15 +910,18 @@ func (st *migState) createGpuInstanceLocked(
 	return st.createGpuInstancePinnedLocked(parent, info, placement, nil)
 }
 
-// createGpuInstancePinnedLocked delegates creation to the embedded go-nvml
-// mock, which already implements the instance tree, and then fills in the
-// instance methods that mock leaves unset. A non-nil id overrides the ID the
-// mock assigned, which is how an explicit layout comes back with the
-// identities it was written down under.
+// createGpuInstancePinnedLocked builds an instance the way go-nvml's mock
+// does and fills in the instance methods that mock leaves unset. A non-nil id
+// names the instance instead of the counter, which is how an explicit layout
+// comes back with the identities it was written down under; the counter is
+// then pushed past that value so a later auto-assigned instance cannot
+// collide with it.
 //
-// Stamping after the fact is safe because the mock keys its instance set on
-// the pointer, never on the ID it handed out. The counter is then pushed past
-// the pinned value so a later auto-assigned instance cannot collide with it.
+// The instance is built complete and joins the device's set last, under the
+// one lock hold. Nothing serialises the library's entry points, so an
+// enumeration on another goroutine walks that set while this runs, and an
+// instance published before it carries its recorded identity would be read
+// under an ID belonging to no partition.
 // Requires st.mu.
 func (st *migState) createGpuInstancePinnedLocked(
 	parent *ConfigurableDevice, info *nvml.GpuInstanceProfileInfo,
@@ -928,26 +931,31 @@ func (st *migState) createGpuInstancePinnedLocked(
 		return nil, nvml.ERROR_INSUFFICIENT_RESOURCES
 	}
 
-	created, ret := parent.Device.CreateGpuInstanceWithPlacement(info, placement)
-	if ret != nvml.SUCCESS {
-		return nil, ret
-	}
-	gi, ok := created.(*mockserver.GpuInstance)
-	if !ok {
-		return nil, nvml.ERROR_UNKNOWN
-	}
+	parent.Device.Lock()
+	assigned := parent.Device.GpuInstanceCounter
 	if id != nil {
-		parent.Device.Lock()
-		gi.Info.Id = *id
-		if parent.Device.GpuInstanceCounter <= *id {
-			parent.Device.GpuInstanceCounter = *id + 1
-		}
-		parent.Device.Unlock()
+		assigned = *id
 	}
+	gi := mockserver.NewGpuInstanceFromInfo(nvml.GpuInstanceInfo{
+		// The ConfigurableDevice rather than the bare mock: this is the object
+		// a caller gets back from nvmlGpuInstanceGetInfo and can turn into a
+		// device handle, and the bare mock panics on any method whose Func
+		// field is unset — a panic inside libnvidia-ml.so is a segfault in
+		// the consumer.
+		Device:    parent,
+		Id:        assigned,
+		ProfileId: info.Id,
+		Placement: *placement,
+	}, parent.Device.Config.MIGProfiles)
 	st.extendGpuInstance(parent, gi)
+	if parent.Device.GpuInstanceCounter <= assigned {
+		parent.Device.GpuInstanceCounter = assigned + 1
+	}
+	parent.Device.GpuInstances[gi] = struct{}{}
+	parent.Device.Unlock()
 
 	debugLog("[MIG] device %d: created GPU instance id=%d profile=%d placement=%d+%d\n",
-		parent.index, gi.Info.Id, info.Id, placement.Start, placement.Size)
+		parent.index, assigned, info.Id, placement.Start, placement.Size)
 	return gi, nvml.SUCCESS
 }
 
@@ -955,13 +963,6 @@ func (st *migState) createGpuInstancePinnedLocked(
 // unset, and wraps Destroy so tearing an instance down also retires the MIG
 // devices derived from it.
 func (st *migState) extendGpuInstance(parent *ConfigurableDevice, gi *mockserver.GpuInstance) {
-	// go-nvml's mock stamps the instance with the bare inner device it was
-	// created on. Repoint it at the ConfigurableDevice: this is the object a
-	// caller gets back from nvmlGpuInstanceGetInfo and can turn into a device
-	// handle, and the bare mock panics on any method whose Func field is
-	// unset — a panic inside libnvidia-ml.so is a segfault in the consumer.
-	gi.Info.Device = parent
-
 	gi.GetComputeInstanceByIdFunc = func(id int) (nvml.ComputeInstance, nvml.Return) {
 		for _, ci := range liveComputeInstances(gi) {
 			if int(ci.Info.Id) == id {
@@ -1011,6 +1012,22 @@ func (st *migState) createComputeInstance(
 	parent *ConfigurableDevice, gi *mockserver.GpuInstance,
 	info *nvml.ComputeInstanceProfileInfo, placement *nvml.ComputeInstancePlacement,
 ) (nvml.ComputeInstance, nvml.Return) {
+	return st.createComputeInstancePinned(parent, gi, info, placement, nil)
+}
+
+// createComputeInstancePinned is createComputeInstance with the option of
+// naming the instance instead of taking the next counter value, which is how
+// an explicit layout's compute instances come back under their recorded IDs.
+// The counter is then pushed past that value so a later auto-assigned
+// instance cannot collide with it.
+//
+// Identity is settled before the instance joins the GPU instance's set, for
+// the same reason it is in createGpuInstancePinnedLocked: an enumeration on
+// another goroutine walks that set as this runs.
+func (st *migState) createComputeInstancePinned(
+	parent *ConfigurableDevice, gi *mockserver.GpuInstance,
+	info *nvml.ComputeInstanceProfileInfo, placement *nvml.ComputeInstancePlacement, id *uint32,
+) (nvml.ComputeInstance, nvml.Return) {
 	if info == nil {
 		return nil, nvml.ERROR_INVALID_ARGUMENT
 	}
@@ -1033,21 +1050,26 @@ func (st *migState) createComputeInstance(
 	}
 
 	gi.Lock()
-	ciInfo := nvml.ComputeInstanceInfo{
+	assigned := gi.ComputeInstanceCounter
+	if id != nil {
+		assigned = *id
+	}
+	ci := mockserver.NewComputeInstanceFromInfo(nvml.ComputeInstanceInfo{
 		Device:      parent,
 		GpuInstance: gi,
-		Id:          gi.ComputeInstanceCounter,
+		Id:          assigned,
 		ProfileId:   info.Id,
 		Placement:   chosen,
+	})
+	st.extendComputeInstance(gi, ci)
+	if gi.ComputeInstanceCounter <= assigned {
+		gi.ComputeInstanceCounter = assigned + 1
 	}
-	gi.ComputeInstanceCounter++
-	ci := mockserver.NewComputeInstanceFromInfo(ciInfo)
 	gi.ComputeInstances[ci] = struct{}{}
 	gi.Unlock()
 
-	st.extendComputeInstance(gi, ci)
 	debugLog("[MIG] device %d: created compute instance gi=%d ci=%d profile=%d placement=%d+%d\n",
-		parent.index, gi.Info.Id, ci.Info.Id, info.Id, chosen.Start, chosen.Size)
+		parent.index, gi.Info.Id, assigned, info.Id, chosen.Start, chosen.Size)
 	return ci, nvml.SUCCESS
 }
 
@@ -1220,6 +1242,13 @@ func (st *migState) destroyAllLocked(parent *ConfigurableDevice) migRetired {
 		retired.gpuInstances = append(retired.gpuInstances, gi)
 	}
 	parent.Device.GpuInstances = make(map[*mockserver.GpuInstance]struct{})
+	// A board with nothing on it can number from the start again, and only a
+	// teardown this total can say that: with no instance left, no new one can
+	// collide with a live ID. Carrying the counter across would rename every
+	// partition a rebuild puts back, and a MIG device's UUID is spliced from
+	// those IDs — so the same layout would come back under names that no
+	// longer match the ones another process on the node is using for it.
+	parent.Device.GpuInstanceCounter = 0
 	parent.Device.Unlock()
 
 	// Outside the device lock: each instance guards its own compute instances,

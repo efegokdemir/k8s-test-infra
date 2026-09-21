@@ -682,10 +682,10 @@ tests:
       - failedTemplate:
           errorMessage: 'gpu.mig.enabled is set but gpu.mig.gpuInstances declares no partitions, so the node would come up MIG-enabled with nothing partitioned. Name the layout, e.g. --set gpu.mig.gpuInstances[0].profile=1g.10gb --set gpu.mig.gpuInstances[0].count=7'
 
-  # A layout can be present and still describe nothing. The board would come up
-  # in the same unusable state as one with no layout at all, so it is the same
-  # refusal.
-  - it: should reject a layout whose counts add up to no partitions
+  # An entry cannot ask for no instances. The engine reads a missing count as
+  # one and cannot tell that from an explicit zero, so a zeroed entry would
+  # come back as the single instance it asked not to be.
+  - it: should reject an entry that asks for no instances
     set:
       gpu:
         profile: a100
@@ -696,7 +696,26 @@ tests:
               count: 0
     asserts:
       - failedTemplate:
-          errorMessage: 'gpu.mig.enabled is set but gpu.mig.gpuInstances declares no partitions, so the node would come up MIG-enabled with nothing partitioned. Name the layout, e.g. --set gpu.mig.gpuInstances[0].profile=1g.10gb --set gpu.mig.gpuInstances[0].count=7'
+          errorMessage: "values don't meet the specifications of the schema(s) in the following chart(s):\nnvml-mock:\n- at '/gpu/mig/gpuInstances/0/count': minimum: got 0, want 1\n"
+
+  # Zeroing one entry of several leaves the total above zero, so the refusal
+  # above does not see it. The entry still materialises as one instance, and
+  # here that instance occupies the slice the 7g partition needed: the board
+  # asked for one whole-board partition and would come up with one seventh.
+  - it: should reject a zeroed entry alongside a real one
+    set:
+      gpu:
+        profile: a100
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile: "1g.5gb"
+              count: 0
+            - profile: "7g.40gb"
+              count: 1
+    asserts:
+      - failedTemplate:
+          errorMessage: "values don't meet the specifications of the schema(s) in the following chart(s):\nnvml-mock:\n- at '/gpu/mig/gpuInstances/0/count': minimum: got 0, want 1\n"
 
   # An entry with no count is one instance, which is what the engine reads it
   # as, so a layout of bare profile names is a valid partitioning.
@@ -722,12 +741,95 @@ tests:
         mig:
           enabled: true
           gpuInstances:
-            - profile: "3g.20gb"
+            - profile: "3g.139gb"
               count: 2
     asserts:
       - matchRegex:
           path: data["config.yaml"]
-          pattern: "profile: 3g.20gb"
+          pattern: "profile: 3g.139gb"
       - matchRegex:
           path: data["config.yaml"]
           pattern: "mode_current: enabled"
+
+  # Geometry carries across boards but names do not, so a layout copied from
+  # another board's docs names rows this one has never published. The engine
+  # answers an unknown row by logging it and moving on, which would leave the
+  # node short of the slices the install asked for and say so nowhere.
+  - it: should refuse a profile the selected board does not publish
+    set:
+      gpu:
+        profile: gb300
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile: "3g.20gb"
+              count: 2
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.mig.gpuInstances declares profile "3g.20gb", which board "gb300" does not publish. Its table offers: 1g.35gb, 1g.35gb+me, 1g.70gb, 2g.70gb, 3g.139gb, 4g.139gb, 7g.278gb'
+
+  # profile_id selects the same rows by their published number, so it is the
+  # same mistake reachable by the other spelling.
+  - it: should refuse a profile_id the selected board does not publish
+    set:
+      gpu:
+        profile: a100
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile_id: 999
+              count: 1
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.mig.gpuInstances declares profile_id 999, which board "a100" does not publish. Its table offers: 19, 20, 15, 14, 9, 5, 0'
+
+  # A row publishes how many of itself the board holds, and asking for more is
+  # not a partial layout: the engine creates what fits, logs the rest and the
+  # install still reports success.
+  - it: should refuse more instances of a profile than the board holds
+    set:
+      gpu:
+        profile: a100
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile: "1g.5gb"
+              count: 8
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.mig.gpuInstances asks for 8 of "1g.5gb", but board "a100" holds 7.'
+
+  # The same refusal reaches a layout that is inside the board's instance
+  # ceiling and still impossible: two partitions against a ceiling of seven,
+  # but only one 4g fits an A100.
+  - it: should refuse two instances of a profile the board holds one of
+    set:
+      gpu:
+        profile: a100
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile: "4g.20gb"
+              count: 2
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.mig.gpuInstances asks for 2 of "4g.20gb", but board "a100" holds 1.'
+
+  # Every entry can sit inside its own limit and the layout still not fit. A
+  # 4g partition takes four of the board's seven compute slices and four 1g
+  # partitions take the other four, which is one slice more than the board
+  # has — so the last one never materialises.
+  - it: should refuse a layout wider than the board
+    set:
+      gpu:
+        profile: a100
+        mig:
+          enabled: true
+          gpuInstances:
+            - profile: "4g.20gb"
+              count: 1
+            - profile: "1g.5gb"
+              count: 4
+    asserts:
+      - failedTemplate:
+          errorMessage: 'gpu.mig.gpuInstances asks for 8 compute slices, but board "a100" has 7.'

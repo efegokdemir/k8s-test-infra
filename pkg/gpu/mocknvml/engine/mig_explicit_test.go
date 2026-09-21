@@ -14,6 +14,7 @@
 package engine
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -352,4 +353,68 @@ func TestMIGLayoutRecords_UnpartitionableBoardHasNoLayout(t *testing.T) {
 	enableMIG(t, dev)
 	require.NotNil(t, dev.MIGLayoutRecords(), "an enabled board with nothing on it has an empty layout")
 	require.Empty(t, dev.MIGLayoutRecords())
+}
+
+// Nothing serialises the library's entry points, so a consumer enumerating the
+// board runs concurrently with a layout being applied underneath it. An
+// instance has to carry the identity its record names before it joins the set
+// the enumeration walks: a reader that catches one in between reads an ID that
+// belongs to no partition, and mints a MIG device under it that outlives the
+// moment. Run under -race, which is how the suite runs.
+func TestApplyMIGLayout_EnumerationRunsAlongsideAnExplicitLayout(t *testing.T) {
+	t.Parallel()
+
+	dev := newTestDeviceWithConfig(t, a100MIGConfig())
+	enableMIG(t, dev)
+
+	profile, ret := dev.GetGpuInstanceProfileInfo(nvml.GPU_INSTANCE_PROFILE_1_SLICE)
+	require.Equal(t, nvml.SUCCESS, ret)
+
+	var readers sync.WaitGroup
+	done := make(chan struct{})
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				// Both levels of the tree: MIGLayoutRecords walks the compute
+				// instances of every GPU instance it reports.
+				_ = dev.MIGLayoutRecords()
+				_, _ = dev.GetGpuInstances(&profile)
+			}
+		}()
+	}
+
+	// IDs and compute instances that a record names rather than the counter,
+	// so a reader seeing a counter-assigned one has caught the gap.
+	for round := range 200 {
+		records := make([]MIGGPUInstanceRecord, 0, 4)
+		for slice := range 4 {
+			start := slice
+			records = append(records, MIGGPUInstanceRecord{
+				ID:               uint32(round*10 + slice),
+				Profile:          "1g.5gb",
+				PlacementStart:   &start,
+				ComputeInstances: &[]MIGComputeInstanceRecord{{ID: uint32(round*10 + slice), Profile: "1c"}},
+			})
+		}
+		dev.applyExplicitPartitions(records)
+		if round == 0 {
+			require.Len(t, dev.MIGLayoutRecords(), len(records),
+				"the layout has to materialise, or the readers have nothing to catch")
+		}
+
+		st := dev.migState
+		st.mu.Lock()
+		st.destroyAllLocked(dev)
+		st.mu.Unlock()
+	}
+
+	close(done)
+	readers.Wait()
 }

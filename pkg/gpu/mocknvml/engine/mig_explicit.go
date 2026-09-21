@@ -214,7 +214,7 @@ func (d *ConfigurableDevice) applyExplicitComputeInstances(
 			warnLog("[MIG] device %d: compute instance %d: %v\n", d.index, rec.ID, err)
 			continue
 		}
-		if ret := createPinnedComputeInstance(d.index, gi, ciProfileID, rec.ID); ret != nvml.SUCCESS {
+		if ret := d.createPinnedComputeInstance(gi, ciProfileID, rec.ID); ret != nvml.SUCCESS {
 			warnLog("[MIG] device %d: cannot recreate compute instance %d: %v\n", d.index, rec.ID, ret)
 			continue
 		}
@@ -222,15 +222,12 @@ func (d *ConfigurableDevice) applyExplicitComputeInstances(
 	}
 }
 
-// createPinnedComputeInstance creates a compute instance through the ordinary
-// path and then gives it the recorded ID, the compute-instance counterpart of
-// createGpuInstancePinnedLocked.
-//
-// Stamping after the fact is safe because the mock keys its compute-instance
-// set on the pointer, never on the ID it handed out. The counter is then
-// pushed past the pinned value so a later auto-assigned instance cannot
-// collide with it.
-func createPinnedComputeInstance(deviceIndex int, gi nvml.GpuInstance, ciProfileID int, id uint32) nvml.Return {
+// createPinnedComputeInstance creates a compute instance under the ID the
+// layout recorded rather than the next counter value, the compute-instance
+// counterpart of createGpuInstancePinnedLocked.
+func (d *ConfigurableDevice) createPinnedComputeInstance(
+	gi nvml.GpuInstance, ciProfileID int, id uint32,
+) nvml.Return {
 	mock, ok := gi.(*mockserver.GpuInstance)
 	if !ok {
 		return nvml.ERROR_UNKNOWN
@@ -239,23 +236,11 @@ func createPinnedComputeInstance(deviceIndex int, gi nvml.GpuInstance, ciProfile
 	if ret != nvml.SUCCESS {
 		return ret
 	}
-	created, ret := gi.CreateComputeInstance(&info)
-	if ret != nvml.SUCCESS {
+	if _, ret := d.migState.createComputeInstancePinned(d, mock, &info, nil, &id); ret != nvml.SUCCESS {
 		return ret
 	}
-	ci, ok := created.(*mockserver.ComputeInstance)
-	if !ok {
-		return nvml.ERROR_UNKNOWN
-	}
-
-	mock.Lock()
-	ci.Info.Id = id
-	if mock.ComputeInstanceCounter <= id {
-		mock.ComputeInstanceCounter = id + 1
-	}
-	mock.Unlock()
 
 	debugLog("[MIG] device %d: pinned compute instance gi=%d ci=%d profile=%d\n",
-		deviceIndex, mock.Info.Id, id, ciProfileID)
+		d.index, mock.Info.Id, id, ciProfileID)
 	return nvml.SUCCESS
 }

@@ -221,6 +221,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- node-agent: a profile the mock library would refuse is no longer staged. The
+  agent checked only the parts it acts on itself, so a profile that failed the
+  library's own validation still reached the node — and the library answers a
+  profile it cannot load by falling back to its built-in eight-A100 default,
+  quietly, because nothing fails. A node asked for two GB300s came up
+  simulating eight A100s while the character devices, capability nodes and CDI
+  entries staged beside the config still described the GB300s. The agent now
+  holds a profile to the same rules, and reports the failure instead of
+  staging, which leaves the last good state in place.
+- nvml-mock: a MIG layout applied while a consumer is reading the board no
+  longer hands it a partition under the wrong identity. An instance was given
+  the identity its layout recorded only after it had joined the set an
+  enumeration walks, so a reader between the two saw the partition under a
+  counter-assigned ID belonging to nothing — and a MIG device minted from that
+  ID outlived the moment. Nothing serialises the library's entry points, so any
+  consumer calling NVML from more than one goroutine was exposed. Instances are
+  now complete before they are published.
+- nvml-mock: rebuilding a MIG layout returns it under the identities it had.
+  GPU-instance IDs are drawn from a counter that a teardown left where it was,
+  so cycling MIG off and on renumbered every partition, and a MIG device's UUID
+  is spliced from those IDs. A consumer that lived through the cycle named the
+  partitions differently from one that started after it, and both differed from
+  the capability nodes the node agent stages. A full teardown now numbers from
+  the start again, which is what having no instances left permits.
+- helm: a MIG layout the selected board cannot satisfy is refused at render
+  rather than at load. A layout the board cannot serve was never an error: the
+  engine created whatever fit, logged the rest and the install still reported
+  success, so the node came up short of the slices it asked for and nothing
+  said why. Four ways to write one are now refused, each checked against the
+  board's own partition table — a `profile` name the board does not publish
+  (names differ per board where the geometry does not: an A100's `3g.20gb` is a
+  GB300's `3g.139gb`), a `profile_id` it does not publish, more instances of a
+  profile than the board holds (eight `1g.5gb` on an A100, which holds seven),
+  and a layout wider than the board even where every entry is within its own
+  limit (a `4g.20gb` plus four `1g.5gb` is eight compute slices on a board with
+  seven).
+- helm: `gpu.mig.gpuInstances` no longer accepts `count: 0`. Zero read as "none"
+  in the schema and as "one" in the engine, which cannot tell an explicit zero
+  from an omitted count. A zeroed entry beside a real one passed the layout's
+  total-count check and then took the slices the real entry needed, so a board
+  asked for one whole-board partition came up with a seventh of one. Drop the
+  entry instead. Refused by the values schema and again at render, so
+  `--skip-schema-validation` does not reach it.
 - nvml-mock: a MIG partition table that cannot be read no longer takes a node's
   partitions away. Only "the file is not there" means a board has no table; any
   other failure — a ConfigMap part-way through a remount, a permission fault —

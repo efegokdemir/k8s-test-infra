@@ -806,9 +806,9 @@ jobs:
         # refuses a capable board without one, and boards that cannot
         # partition skip every spec. a100 is left out because it would re-run
         # Hopper's assertions against different slice names for the cost of
-        # another kind cluster. gb200 and gb300 are left out because go-nvml
-        # carries only the B200 MIG table, so their slice sizes would be a
-        # B200's rather than their own.
+        # another kind cluster, and gb200 and gb300 for the same reason
+        # against b200's: the chart ships each of them a table of its own, and
+        # the three tables carry one Blackwell geometry under three namings.
         gpu-profile: [h100, b200]
     steps:
       - name: Checkout

@@ -248,6 +248,19 @@ func LoadYAMLConfig(path string) (*YAMLConfig, error) {
 	return &config, nil
 }
 
+// ValidateConfig checks a profile by the rules LoadYAMLConfig applies, for
+// callers that hold a decoded config rather than a path.
+//
+// The node agent is why this is exported: it stages the document this library
+// later loads, and a profile it accepts that LoadYAMLConfig then rejects does
+// not surface as an error, because LoadConfig answers a rejected profile with
+// DefaultConfig. The node would simulate eight A100s while the devices,
+// capability nodes and CDI entries staged beside the config describe the board
+// the profile named.
+func ValidateConfig(config *YAMLConfig) error {
+	return validateYAMLConfig(config)
+}
+
 // validateYAMLConfig performs basic validation on the loaded config
 func validateYAMLConfig(config *YAMLConfig) error {
 	if config.Version == "" {

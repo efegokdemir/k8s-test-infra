@@ -466,12 +466,11 @@ what the driver reports when the same call is made without the permissions it
 needs.
 
 **This changes the NVML view only.** `/dev/nvidia-caps` and the `mig-minors`
-table stay as the node agent staged them at pod start, so the device plugin
-cannot *allocate* what a repartition produces — including a layout identical to
-the installed one, since a rebuild draws fresh GPU-instance IDs. Clearing the
-override, `nvml-mock-ctl reset` included, restores the layout NVML reports but
-not the instance IDs it reports them under, so only restarting the `nvml-mock`
-pod makes the node allocatable again — see the v1 scope note above.
+table stay as the node agent staged them at pod start, so a partition that a
+repartition created is never *allocatable* — see the v1 scope note above.
+Clearing the override, `nvml-mock-ctl reset` included, returns NVML to the
+installed layout under the instance IDs it reported before, which is the
+layout those staged files were written for.
 
 ### `set` — set arbitrary fields
 
