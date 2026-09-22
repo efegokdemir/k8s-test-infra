@@ -1,0 +1,110 @@
+# nvml-mock Helm chart values
+
+This page is generated from the chart's `values.yaml` with
+[`helm-docs`](https://github.com/norwoodj/helm-docs). Edit the comments beside
+the values in `deployments/nvml-mock/helm/nvml-mock/values.yaml`, then run
+`make helm-docs` to refresh this reference.
+
+## Values
+
+| Key | Type | Default |
+|-----|------|---------|
+| gpu.profile | string | `"gb300"` |
+| gpu.count | string | `""` |
+| gpu.customConfig | string | `""` |
+| gpu.dynamicMetrics.enabled | bool | `false` |
+| gpu.failureInjection.enabled | bool | `false` |
+| gpu.failureInjection.mode | string | `"healthy"` |
+| gpu.failureInjection.probability | float | `0` |
+| gpu.failureInjection.after_calls | int | `0` |
+| gpu.failureInjection.seed | int | `0` |
+| gpu.failureInjection.xid.code | int | `0` |
+| image.repository | string | `"ghcr.io/nvidia/nvml-mock"` |
+| image.tag | string | `"latest"` |
+| image.pullPolicy | string | `"IfNotPresent"` |
+| driverVersion | string | `""` |
+| nodeSelector | object | `{}` |
+| tolerations[0].operator | string | `"Exists"` |
+| nodeLabels.featuresDir | string | `"/etc/kubernetes/node-feature-discovery/features.d"` |
+| nodeAgent.logging.level | string | `"info"` |
+| nodeAgent.logging.format | string | `"json"` |
+| nodeAgent.kernelLog.enabled | bool | `false` |
+| nodeAgent.shutdownTimeout | string | `"5s"` |
+| nodeAgent.resources.requests.cpu | string | `"10m"` |
+| nodeAgent.resources.requests.memory | string | `"32Mi"` |
+| allocationWatcher.enabled | bool | `false` |
+| allocationWatcher.interval | string | `"2s"` |
+| allocationWatcher.usedFractionPerClaim | float | `0.5` |
+| allocationWatcher.podResourcesSocket | string | `"/var/lib/kubelet/pod-resources/kubelet.sock"` |
+| allocationWatcher.resources.limits.cpu | string | `"100m"` |
+| allocationWatcher.resources.limits.memory | string | `"64Mi"` |
+| allocationWatcher.resources.requests.cpu | string | `"10m"` |
+| allocationWatcher.resources.requests.memory | string | `"32Mi"` |
+| nri.enabled | bool | `false` |
+| nri.logging.level | string | `"info"` |
+| nri.logging.format | string | `"json"` |
+| nri.socketPath | string | `"/var/run/nri/nri.sock"` |
+| nri.pluginName | string | `"nvml-mock"` |
+| nri.pluginIndex | string | `"10"` |
+| nri.image | object | `{}` |
+| nri.overlay.hostPath | string | `"/var/lib/nvml-mock"` |
+| nri.overlay.mountPath | string | `"/opt/nvml-mock"` |
+| nri.optOutAnnotation | string | `"nvml-mock.nvidia.com/inject"` |
+| nri.deviceAnnotation | string | `"nvml-mock.nvidia.com/devices"` |
+| nri.deviceInjectionMode | string | `"raw"` |
+| nri.cdiSpecDir | string | `"/var/run/cdi"` |
+| nri.imexChannelAnnotation | string | `"nvml-mock.nvidia.com/imex-channels"` |
+| nri.excludedNamespaces | list | `[]` |
+| nri.resources | object | `{}` |
+| nri.healthPort | int | `8080` |
+| nri.readinessProbe.httpGet.path | string | `"/readyz"` |
+| nri.readinessProbe.httpGet.port | string | `"health"` |
+| nri.readinessProbe.periodSeconds | int | `10` |
+| nri.readinessProbe.timeoutSeconds | int | `2` |
+| nri.readinessProbe.failureThreshold | int | `2` |
+| nri.livenessProbe.httpGet.path | string | `"/healthz"` |
+| nri.livenessProbe.httpGet.port | string | `"health"` |
+| nri.livenessProbe.periodSeconds | int | `10` |
+| nri.livenessProbe.timeoutSeconds | int | `2` |
+| nri.livenessProbe.failureThreshold | int | `3` |
+| updateStrategy.type | string | `"RollingUpdate"` |
+| updateStrategy.rollingUpdate.maxUnavailable | string | `"25%"` |
+| terminationGracePeriodSeconds | int | `10` |
+| topology.enabled | bool | `false` |
+| topology.domains | list | `[]` |
+| infiniband.mockTier | string | `""` |
+| infiniband.ping.port | int | `18515` |
+| infiniband.ping.networkPolicy.enabled | bool | `true` |
+| imex.mockChannels.enabled | bool | `false` |
+| imex.mockChannels.channelCount | int | `2048` |
+| imex.mockChannels.channelMajor | int | `235` |
+| imex.mockChannels.capsMajor | int | `236` |
+| fabricmanager.enabled | string | `""` |
+| fabricmanager.stateDir | string | `"/var/lib/nvml-mock/fabric-state"` |
+| fabricmanager.initDelay | string | `""` |
+| integrations.fakeGpuOperator.enabled | bool | `false` |
+| integrations.fakeGpuOperator.targetNamespace | string | `""` |
+| integrations.fakeGpuOperator.profileLabels."run.ai/gpu-profile" | string | `"true"` |
+| controlPlane.enabled | bool | `false` |
+| controlPlane.replicas | int | `1` |
+| controlPlane.image.repository | string | `"ghcr.io/nvidia/mokka-control-plane"` |
+| controlPlane.image.digest | string | `""` |
+| controlPlane.image.tag | string | `""` |
+| controlPlane.image.allowMutableTag | bool | `false` |
+| controlPlane.image.pullPolicy | string | `"IfNotPresent"` |
+| controlPlane.logging.level | string | `"info"` |
+| controlPlane.logging.format | string | `"json"` |
+| controlPlane.shutdownTimeout | string | `"5s"` |
+| controlPlane.workers | int | `2` |
+| controlPlane.kubeAPIQPS | int | `50` |
+| controlPlane.kubeAPIBurst | int | `100` |
+| controlPlane.leaderElection.name | string | `"control-plane.mokka.nvidia.com"` |
+| controlPlane.service.type | string | `"ClusterIP"` |
+| controlPlane.service.port | int | `8080` |
+| controlPlane.terminationGracePeriodSeconds | int | `30` |
+| controlPlane.resources.requests.cpu | string | `"50m"` |
+| controlPlane.resources.requests.memory | string | `"64Mi"` |
+| controlPlane.resources.limits.cpu | string | `"500m"` |
+| controlPlane.resources.limits.memory | string | `"1Gi"` |
+| controlPlane.nodeSelector | object | `{}` |
+| controlPlane.tolerations | list | `[]` |

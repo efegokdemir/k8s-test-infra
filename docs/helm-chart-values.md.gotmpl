@@ -1,0 +1,14 @@
+# nvml-mock Helm chart values
+
+This page is generated from the chart's `values.yaml` with
+[`helm-docs`](https://github.com/norwoodj/helm-docs). Edit the comments beside
+the values in `deployments/nvml-mock/helm/nvml-mock/values.yaml`, then run
+`make helm-docs` to refresh this reference.
+
+## Values
+
+| Key | Type | Default |
+|-----|------|---------|
+{{- range .Values }}
+| {{ .Key }} | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} |
+{{- end }}

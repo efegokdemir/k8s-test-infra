@@ -477,6 +477,22 @@ repository-automation-ci: ## Validate and package the repository automation acti
 	cd $(REPOSITORY_AUTOMATION_DIR) && npm run package
 	cd $(REPOSITORY_AUTOMATION_DIR) && git diff --exit-code -- dist
 
+HELM_DOCS_VERSION ?= v1.14.2
+HELM_DOCS_TEMPLATE := $(CURDIR)/docs/helm-chart-values.md.gotmpl
+HELM_DOCS_OUTPUT   := ../../../../docs/reference/helm-chart-values.md
+
+.PHONY: helm-docs helm-docs-check helm-tests
+helm-docs: ## Generate the nvml-mock Helm values reference
+	go run github.com/norwoodj/helm-docs/cmd/helm-docs@$(HELM_DOCS_VERSION) \
+		--chart-to-generate $(HELM_CHART_DIR) \
+		--template-files $(HELM_DOCS_TEMPLATE) \
+		--output-file $(HELM_DOCS_OUTPUT) \
+		--skip-version-footer \
+		--sort-values-order file
+
+helm-docs-check: helm-docs ## Verify that the generated Helm values reference is current
+	git diff --exit-code -- docs/reference/helm-chart-values.md
+
 .PHONY: helm-tests
 helm-tests: ## Run the nvml-mock chart unit test suite
 	helm unittest $(HELM_CHART_DIR)
