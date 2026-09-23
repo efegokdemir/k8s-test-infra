@@ -61,6 +61,18 @@ var _ = Describe("nvml-mock GPU Operator", Label("gpu-operator"), Ordered, func(
 				waitOperatorValidatorRunning(ctx, h)
 			})
 
+			It("recovers the validator after nvml-mock restarts", Label("ordering"), func(ctx SpecContext) {
+				// Restarting Mokka after the Operator is already healthy models the
+				// ordering that exposed #857: the validator may bind its driver
+				// path before the node agent has finished staging the mock files.
+				// The validator must recover when the bind-mounted tree is populated.
+				Expect(h.Kube.DeletePodsByLabel(ctx, nvmlMockNamespace, nvmlMockSelector)).To(Succeed(),
+					"restart nvml-mock after the GPU Operator is ready")
+				assertions.WaitDaemonSetReady(ctx, h.Kube, nvmlMockNamespace, "nvml-mock",
+					config.ReadyTimeout(), config.PollInterval())
+				waitOperatorValidatorRunning(ctx, h)
+			})
+
 			It("publishes GFD labels and allocatable GPUs", Label("device-plugin"), func(ctx SpecContext) {
 				// Hard assertion, derived from the profile rather than read back
 				// off the node. The previous warning-only check could never fail,
